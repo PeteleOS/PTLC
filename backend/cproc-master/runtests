@@ -1,0 +1,59 @@
+#!/bin/sh
+
+: ${CCQBE:=./cproc-qbe}
+
+if [ $# = 0 ] ; then
+	set -- test/*.c test/constraint/*.c
+fi
+
+numtest=0
+numpass=0
+numfail=0
+fail=
+got=$(mktemp)
+tmp=$(mktemp)
+trap 'rm "$got"' EXIT
+
+checkfail() {
+	got=$1
+	shift
+	"$@" >"$tmp" 2>&1 && return 1
+	cut -d ' ' -f 2- "$tmp" >"$got"
+}
+
+for test ; do
+	name=${test%.c}
+	case $name in
+	*+*) arch=${name##*+} ;;
+	*) arch=x86_64-sysv ;;
+	esac
+	if [ -f "$name.qbe" ] ; then
+		want=$name.qbe
+		set -- $CCQBE -t $arch -o "$got" "$test"
+	elif [ -f "$name.pp" ] ; then
+		want=$name.pp
+		set -- $CCQBE -t $arch -E -o "$got" "$test"
+	elif [ -f "$name.err" ] ; then
+		want=$name.err
+		set -- checkfail "$got" $CCQBE -t $arch -o /dev/null "$test"
+	else
+		echo "invalid test '$test'" >&2
+		continue
+	fi
+	numtest=$((numtest + 1))
+	if "$@" && diff -Nu "$want" "$got" ; then
+		result="PASS"
+		numpass=$((numpass + 1))
+	else
+		result="FAIL"
+		numfail=$((numfail + 1))
+		fail="$fail $test"
+	fi
+	echo "[$result] $test" >&2
+done
+
+printf "\n%d/%d tests passed\n" "$numpass" "$numtest"
+if [ "$numfail" -gt 0 ] ; then
+	printf "%d test(s) failed (%s)\n" "$numfail" "${fail# }"
+	exit 1
+fi

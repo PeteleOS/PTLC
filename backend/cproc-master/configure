@@ -1,0 +1,310 @@
+#!/bin/sh
+
+fail() {
+	echo "$0: $*" >&2
+	exit 1
+}
+
+prefix=/usr/local
+bindir='$(PREFIX)/bin'
+host=
+target=
+gcclibdir=
+
+for arg ; do
+	case "$arg" in
+	--prefix=*) prefix=${arg#*=} ;;
+	--bindir=*) bindir=${arg#*=} ;;
+	--host=*) host=${arg#*=} ;;
+	--target=*) target=${arg#*=} ;;
+	--with-cpp=*) DEFAULT_CPP=${arg#*=} ;;
+	--with-qbe=*) DEFAULT_QBE=${arg#*=} ;;
+	--with-as=*) DEFAULT_AS=${arg#*=} ;;
+	--with-ld=*) DEFAULT_LD=${arg#*=} ;;
+	--with-ldso=*) DEFAULT_LDSO=${arg#*=} ;;
+	--with-gcc-libdir=*) gcclibdir=${arg#*=} ;;
+	--with-macos-sdk=*) macossdk=${arg#*=} ;;
+	CC=*) CC=${arg#*=} ;;
+	CFLAGS=*) CFLAGS=${arg#*=} ;;
+	LDFLAGS=*) LDFLAGS=${arg#*=} ;;
+	*) fail "unknown option '$arg'"
+	esac
+done
+
+: ${CC:=cc}
+
+printf 'checking host system type... '
+test -n "$host" || host=$($CC -dumpmachine 2>/dev/null) || fail "could not determine host"
+printf '%s\n' "$host"
+
+printf 'checking target system type... '
+test -n "$target" || target=$host
+printf '%s\n' "$target"
+
+toolprefix=
+if [ "$host" != "$target" ] ; then
+	toolprefix=$target-
+fi
+
+startfiles=0
+endfiles=0
+linkflags=
+defines='
+	"-D", "__STDC_ENDIAN_LITTLE__=1234",
+	"-D", "__STDC_ENDIAN_BIG__=4321",
+	"-D", "__STDC_ENDIAN_NATIVE__=__STDC_ENDIAN_LITTLE__",
+	"-D", "__ORDER_LITTLE_ENDIAN__=__STDC_ENDIAN_LITTLE__",
+	"-D", "__ORDER_BIG_ENDIAN__=__STDC_ENDIAN_BIG__",
+	"-D", "__BYTE_ORDER__=__STDC_ENDIAN_NATIVE__",
+	"-D", "__FLT_EVAL_METHOD__=1",
+	"-D", "__BITINT_MAXWIDTH__=64",
+'
+
+model=
+case "$target" in
+x86_64-*x32)
+	fail "unsupported target '$target'";;
+x86_64-*|amd64-*)
+	model=lp64
+	# __amd64__ is used by at least freebsd
+	defines=$defines'
+	"-D", "__x86_64__",
+	"-D", "__amd64__",
+'
+	;;
+aarch64-*)
+	model=lp64
+	defines=$defines'
+	"-D", "__aarch64__",
+'
+	;;
+riscv64-*)
+	model=lp64
+	defines=$defines'
+	"-D", "__riscv",
+	"-D", "__riscv_i=2001000",
+	"-D", "__riscv_m=2000000",
+	"-D", "__riscv_a=2001000",
+	"-D", "__riscv_f=2002000",
+	"-D", "__riscv_d=2002000",
+	"-D", "__riscv_c=2000000",
+	"-D", "__riscv_xlen=64",
+	"-D", "__riscv_flen=64",
+'
+	;;
+*)
+	fail "unsupported target '$target'";;
+esac
+
+case "$model" in
+lp64)
+	# __SIZEOF_LONG__ is used by freebsd
+	defines=$defines'
+	"-D", "__LP64__",
+	"-D", "__SIZEOF_LONG__=8",
+	"-D", "__SIZEOF_POINTER__=8",
+	"-D", "__SIZEOF_SIZE_T__=8",
+	"-D", "__SIZEOF_PTRDIFF_T__=8",
+'
+	;;
+*)
+	fail "unsupported model '$target'";;
+esac
+
+case "$target" in
+*-linux-*musl*)
+	test "${DEFAULT_LDSO+set}" || case "$target" in
+	x86_64*)  DEFAULT_LDSO=/lib/ld-musl-x86_64.so.1  ;;
+	aarch64*) DEFAULT_LDSO=/lib/ld-musl-aarch64.so.1 ;;
+	riscv64*) DEFAULT_LDSO=/lib/ld-musl-riscv64.so.1 ;;
+	*) fail "unsuported target '$target'"
+	esac
+	startfiles='"-l", ":crt1.o", "-l", ":crti.o"'
+	endfiles='"-l", "c", "-l", ":crtn.o"'
+	defines=$defines'
+	"-D", "__linux__",
+	"-D", "__unix__",
+'
+	;;
+*-linux-*gnu*)
+	test "${DEFAULT_LDSO+set}" || case "$target" in
+	x86_64*)  DEFAULT_LDSO=/lib64/ld-linux-x86-64.so.2 ;;
+	aarch64*) DEFAULT_LDSO=/lib/ld-linux-aarch64.so.1  ;;
+	riscv64*) DEFAULT_LDSO=/lib/ld-linux-riscv64-lp64d.so.1 ;;
+	*) fail "unsuported target '$target'"
+	esac
+	startfiles='"-l", ":crt1.o", "-l", ":crti.o", "-l", ":crtbegin.o"'
+	endfiles='"-l", "c", "-l", ":crtend.o", "-l", ":crtn.o"'
+	if [ -z "$gcclibdir" ] ; then
+		test "$host" = "$target" || fail "gcc libdir must be specified when building a cross-compiler"
+		crtbegin=$($CC -print-file-name=crtbegin.o 2>/dev/null)
+		gcclibdir=${crtbegin%/*}
+	fi
+	linkflags='"-L", "'$gcclibdir'",'
+	# __INT_MAX__ and __LONG_LONG_MAX__ are used by gcc's limits.h
+	defines=$defines'
+	"-D", "__linux__",
+	"-D", "__unix__",
+	"-D", "__INT_MAX__=0x7fffffff",
+	"-D", "__LONG_LONG_MAX__=0x7fffffffffffffffL",
+'
+	;;
+*-*freebsd*)
+	: ${DEFAULT_LDSO:=/libexec/ld-elf.so.1}
+	startfiles='"-l", ":crt1.o", "-l", ":crti.o"'
+	endfiles='"-l", "c", "-l", ":crtn.o"'
+	linkflags='"-L", "/usr/lib",'
+	defines=$defines'
+	"-D", "__FreeBSD__",
+	"-D", "__unix__",
+
+	"-D", "_Pragma(x)=",
+	"-D", "_Nullable=",
+	"-D", "_Nonnull=",
+
+	"-D", "__GNUCLIKE_BUILTIN_STDARG",
+	"-D", "__GNUCLIKE_BUILTIN_VARARGS",
+
+	/* disable TLS for rune locale (needs initial-exec TLS, #103 */
+	"-D", "__RUNETYPE_INTERNAL",
+
+	/* required to define _RuneLocale, needed by xlocale/_ctype.h */
+	"-D", "_USE_CTYPE_INLINE_",
+	/* workaround for #42 */
+	"-D", "_XLOCALE_INLINE=static inline",
+
+	/* disable warnings for redefining _Pragma */
+	"-Wno-builtin-macro-redefined",
+'
+	;;
+*-*dragonflybsd*)
+	: ${DEFAULT_LDSO:=/libexec/ld-elf.so.2}
+	startfiles='"-l", ":crt1.o", "-l", ":crti.o"'
+	endfiles='"-l", "c", "-l", ":crtn.o"'
+	linkflags='"-L", "/usr/lib",'
+	defines=$defines'
+	"-D", "__DragonFly__",
+	"-D", "__unix__",
+
+	"-D", "_Pragma(x)=",
+	"-D", "_Nullable=",
+	"-D", "_Nonnull=",
+
+	"-D", "__GNUCLIKE_BUILTIN_STDARG",
+	"-D", "__GNUCLIKE_BUILTIN_VARARGS",
+
+	/* disable TLS for errno and rune locale (needs initial-exec TLS, #103) */
+	"-D", "__WANT_NO_INLINED___ERROR",
+	"-D", "__RUNETYPE_INTERNAL",
+
+	/* required to define _RuneLocale, needed by xlocale/_ctype.h */
+	"-D", "_USE_CTYPE_INLINE_",
+	/* workaround for #42 */
+	"-D", "_XLOCALE_INLINE=static inline",
+
+	/* disable warnings for redefining _Pragma */
+	"-Wno-builtin-macro-redefined",
+'
+	;;
+*-*openbsd*)
+	: ${DEFAULT_LDSO:=/usr/libexec/ld.so}
+	test "$host" = "$target" && : ${DEFAULT_CPP:=/usr/libexec/cpp} ${DEFAULT_AS:=gas}
+	startfiles='"-l", ":crt0.o", "-l", ":crtbegin.o"'
+	endfiles='"-l", "c", "-l", ":crtend.o"'
+	linkflags='"-L", "/usr/lib", "-nopie",'
+	defines=$defines'
+	"-D", "__OpenBSD__",
+	"-D", "__unix__",
+
+	/* required to prevent libc headers from declaring functions with conflicting linkage */
+	"-D", "_ANSI_LIBRARY",
+
+	/* these are used unconditionally, but only defined with __GNUC__ or __PCC__ */
+	"-D", "__aligned(a)=[[__gnu__::__aligned__(a)]]",
+	"-D", "__packed=[[__gnu__::__packed__]]",
+
+	/* disable warnings for redefining __FLT_EVAL_METHOD__ */
+	"-Wno-builtin-macro-redefined",
+'
+	;;
+*-*netbsd*)
+	: ${DEFAULT_LDSO:=/usr/libexec/ld.elf_so}
+	startfiles='"-l", ":crt0.o", "-l", ":crti.o"'
+	endfiles='"-l", "c", "-l", ":crtn.o"'
+	defines=$defines'
+	"-D", "__NetBSD__",
+	"-D", "__unix__",
+
+	"-D", "__builtin_stdarg_start(ap, last)=__builtin_va_start(ap, last)",
+
+	"-D", "__CHAR_BIT__=8",
+	"-D", "__SCHAR_MAX__=0x7f",
+	"-D", "__SHRT_MAX__=0x7fff",
+	"-D", "__INT_MAX__=0x7fffffff",
+	"-D", "__LONG_MAX__=__LONG_LONG_MAX__",
+	"-D", "__LONG_LONG_MAX__=0x7fffffffffffffffL",
+	"-D", "__WINT_TYPE__=int",
+	"-D", "__WCHAR_TYPE__=int",
+	"-D", "__SIZE_TYPE__=unsigned long",
+	"-D", "__PTRDIFF_TYPE__=long",
+'
+	;;
+*-apple-darwin*)
+	: ${DEFAULT_CPP:=clang -E}
+	startfiles='0'
+	endfiles='"-l", "System"'
+	defines=$defines'
+	"-D", "__APPLE__",
+	"-D", "__unix__",
+
+	"-D", "_Nullable=",
+	"-D", "__compar=",
+	"-U", "__BLOCKS__",
+'
+	if [ -z "$macossdk" ] ; then
+		test "$host" = "$target" || fail "macos sdk must be specified when building a cross-compiler"
+		macossdk=$(xcrun --show-sdk-path)
+	fi
+	linkflags='"-syslibroot", "'$macossdk'"'
+	;;
+*)
+	fail "unknown target '$target', please create config.h manually"
+esac
+
+DEFAULT_CPP=$(printf '"%s", ' ${DEFAULT_CPP:-${toolprefix}cpp})
+DEFAULT_QBE=$(printf '"%s", ' ${DEFAULT_QBE:-qbe})
+DEFAULT_AS=$(printf '"%s", ' ${DEFAULT_AS:-${toolprefix}as})
+DEFAULT_LD=$(printf '"%s", ' ${DEFAULT_LD:-${toolprefix}ld})
+
+test -n "$DEFAULT_LDSO" && linkflags=$linkflags' "--dynamic-linker", "'$DEFAULT_LDSO'"'
+
+printf "creating config.h... "
+cat >config.h <<EOF
+static const char target[]               = "$target";
+static const char *const startfiles[]    = {$startfiles};
+static const char *const endfiles[]      = {$endfiles};
+static const char *const preprocesscmd[] = {
+	$DEFAULT_CPP"-undef",
+
+	/* we don't yet support these optional features */
+	"-D", "__STDC_NO_ATOMICS__",
+	"-D", "__STDC_NO_COMPLEX__",
+
+	/* ignore extension markers */
+	"-D", "__extension__=",
+$defines};
+static const char *const codegencmd[]    = {$DEFAULT_QBE};
+static const char *const assemblecmd[]   = {$DEFAULT_AS};
+static const char *const linkcmd[]       = {$DEFAULT_LD$linkflags};
+EOF
+echo done
+
+printf "creating config.mk... "
+cat >config.mk <<EOF
+PREFIX=$prefix
+BINDIR=$bindir
+CC=${CC:-cc}
+CFLAGS=${CFLAGS:--Wall -Wpedantic -Wno-parentheses -Wno-switch -g -pipe}
+LDFLAGS=$LDFLAGS
+EOF
+echo done

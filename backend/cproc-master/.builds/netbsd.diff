@@ -1,0 +1,21 @@
+diff --git a/sys/cdefs.h b/sys/cdefs.h
+index 3ca3b1f16b0c..caa623c0123c 100644
+--- a/sys/cdefs.h
++++ b/sys/cdefs.h
+@@ -497,13 +497,11 @@
+ #endif
+ 
+ #if !defined(_STANDALONE) && !defined(_KERNEL)
+-#if defined(__GNUC__) || defined(__PCC__)
+-#define	__RENAME(x)	___RENAME(x)
+-#elif defined(__lint__)
++#if defined(__lint__)
+ #define	__RENAME(x)	__symbolrename(x)
+ #else
+-#error "No function renaming possible"
+-#endif /* __GNUC__ */
++#define	__RENAME(x)	___RENAME(x)
++#endif /* __lint__ */
+ #else /* _STANDALONE || _KERNEL */
+ #define	__RENAME(x)	no renaming in kernel/standalone environment
+ #endif
